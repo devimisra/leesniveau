@@ -35,3 +35,14 @@ Evaluated via 5-fold Stratified Cross-Validation on 3,596 CEFR-graded Dutch refe
 ├── scripts/              # Offline dictionary build, benchmarking, SHAP analysis & ONNX export
 ├── tests/                # Pytest integrity, homograph & ONNX inference parity checks
 └── logs/                 # 5-fold CV learning curves, confusion matrix, SHAP plots & error audit
+
+## License & Data Attributions
+
+- **Source Code (`scripts/`, `tests/`, `web/*.html`, `web/*.css`, `web/*.js`):** Released under the [MIT License](LICENSE).
+- **Compiled Data & Model Artifacts (`web/dictionary.json`, `web/leesniveau_model.onnx`):** Distributed for **non-commercial use only**, subject to the respective licenses of the upstream datasets below. Raw training and lexicon files are not redistributed in this repository.
+
+### Third-Party Datasets
+- **NT2Lex (Lexical CEFR Levels):** Tack, A., François, T., Desmet, P., & Fairon, C. (2018). *NT2Lex: A CEFR-Graded Lexical Resource for Dutch as a Foreign Language Linked to Open Dutch WordNet.* BEA 2018. Available via [CENTAL / UCLouvain](https://cental.uclouvain.be/cefrlex/nt2lex/) under **CC BY-NC-SA 4.0**.
+- **Wiktionary via kaikki.org (Definitions & Inflections):** Derived from English Wiktionary contributors via [kaikki.org](https://kaikki.org/) (`wiktextract`, Ylonen, 2022) under **CC BY-SA 4.0** / **GFDL**.
+- **wordfreq (Zipf Word Frequencies):** Speer, R. (2022). *rspeer/wordfreq*. Code licensed under **Apache 2.0**; frequency data redistributed under **CC BY-SA 4.0**. Credits include the **SUBTLEX** authors (SUBTLEX is freely available data).
+- **ELG Dutch CEFR Dataset (Model Training Corpus):** Sourced from EDIA / European Language Grid via [UniversalCEFR/elg_cefr_nl](https://huggingface.co/datasets/UniversalCEFR/elg_cefr_nl) under **CC BY-NC 4.0** (non-commercial, academic/research use).
