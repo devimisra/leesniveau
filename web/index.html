@@ -1,19 +1,18 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="nl">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>LeesNiveau — Dutch CEFR Text Grader</title>
-  <link rel="icon" href="data:," />
-  <link rel="stylesheet" href="style.css" />
-  <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.31.1/dist/ort.min.js"></script>
+  <title>LeesNiveau — Dutch CEFR Readability Grader</title>
+  <link rel="stylesheet" href="./style.css" />
+  <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1/dist/ort.min.js"></script>
 </head>
 <body>
   <main class="container">
-    <header class="header">
+    <header>
       <h1>LeesNiveau</h1>
-      <p class="subtitle">100% client-side Dutch CEFR readability grader powered by WebAssembly &amp; ONNX</p>
-      <p id="status" class="status">Loading model and dictionary...</p>
+      <p class="subtitle">Zero-backend Dutch CEFR readability grader (A1–C2) powered by WebAssembly</p>
+      <div id="status" class="status">Loading model and dictionary...</div>
     </header>
 
     <section class="input-section">
@@ -45,36 +44,43 @@
     </section>
 
     <section id="results" hidden>
-      <div class="result-card">
-        <div class="result-header">
-          <div>
-            <span class="result-label">Estimated Level</span>
-            <div class="level-row">
-              <span id="cefrBadge" class="cefr-badge">—</span>
-              <span id="scoreText" class="score-text"></span>
-            </div>
-          </div>
-          <div id="statsGrid" class="stats-grid"></div>
+      <div class="score-card">
+        <div class="score-header">
+          <span id="cefrBadge" class="cefr-badge">—</span>
+          <span id="scoreText" class="score-text">raw score: —</span>
         </div>
 
-        <div class="scale-wrapper" aria-label="CEFR scale">
-          <div class="scale-bar">
-            <div class="scale-seg seg-a1">A1</div>
-            <div class="scale-seg seg-a2">A2</div>
-            <div class="scale-seg seg-b1">B1</div>
-            <div class="scale-seg seg-b2">B2</div>
-            <div class="scale-seg seg-c1">C1</div>
-            <div class="scale-seg seg-c2">C2</div>
-          </div>
+        <div class="scale-bar" aria-label="CEFR scale A1 to C2">
+          <div class="scale-seg">A1</div>
+          <div class="scale-seg">A2</div>
+          <div class="scale-seg">B1</div>
+          <div class="scale-seg">B2</div>
+          <div class="scale-seg">C1</div>
+          <div class="scale-seg">C2</div>
           <div id="scaleMarker" class="scale-marker" hidden></div>
         </div>
 
-        <p id="shortWarning" class="warning" hidden>
-          Short text (&lt; 30 words): paste a full paragraph for a more reliable CEFR estimate.
-        </p>
-        <p id="langWarning" class="warning" hidden>
-          Low Dutch word recognition — this text may not be Dutch or contains heavy jargon, so the CEFR estimate may be unreliable.
-        </p>
+        <div id="shortWarning" class="warning" hidden>
+          Short text (&lt; 30 words): CEFR estimates are less stable on very brief excerpts.
+        </div>
+        <div id="langWarning" class="warning" hidden>
+          Low Dutch dictionary coverage: ensure the pasted text is in Dutch.
+        </div>
+
+        <div id="statsGrid" class="stats-grid"></div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-header">
+          <h2>Annotated Text</h2>
+          <div class="legend">
+            <span class="hl hl-b1">B1</span>
+            <span class="hl hl-b2">B2</span>
+            <span class="hl hl-c1">C1</span>
+            <span class="hl hl-rare">Rare / Compound</span>
+          </div>
+        </div>
+        <div id="annotatedText" class="annotated-text"></div>
       </div>
 
       <div class="panel">
@@ -91,24 +97,16 @@
         </div>
         <ul id="vocabList"></ul>
       </div>
-
-      <div class="panel">
-        <h2>Study Vocabulary (<span id="vocabCount">0</span>)</h2>
-        <ul id="vocabList"></ul>
-      </div>
     </section>
 
-    <footer class="footer">
+    <footer>
       <p>
-        Runs entirely in your browser — no text leaves your device.
-        Lexical CEFR levels from
-        <a href="https://cental.uclouvain.be/cefrlex/nt2lex/" target="_blank" rel="noopener">NT2Lex</a>
-        (Tack, François, Desmet &amp; Fairon, 2018; CC BY-NC-SA 4.0).
-        Definitions from Wiktionary via kaikki.org (CC BY-SA) and frequencies via wordfreq.
+        100% client-side inference — your text never leaves your browser.
+        Lexical data: NT2Lex (CC BY-NC-SA 4.0), Wiktionary via kaikki.org (CC BY-SA 4.0), and wordfreq (CC BY-SA 4.0).
       </p>
     </footer>
   </main>
 
-  <script src="app.js"></script>
+  <script src="./app.js"></script>
 </body>
 </html>
