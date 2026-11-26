@@ -36,6 +36,7 @@ Evaluated via 5-fold Stratified Cross-Validation on 3,596 CEFR-graded Dutch refe
 ├── scripts/              # Offline dictionary build, benchmarking, SHAP analysis & ONNX export
 ├── tests/                # Pytest integrity, homograph & ONNX inference parity checks
 └── logs/                 # 5-fold CV learning curves, confusion matrix, SHAP plots & error audit
+```
 
 ## License & Data Attributions
 
