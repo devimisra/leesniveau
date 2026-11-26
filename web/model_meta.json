@@ -1,0 +1,39 @@
+{
+  "version": "1.3.1",
+  "model_type": "regressor",
+  "features": [
+    "avg_sent_len",
+    "max_sent_len",
+    "std_sent_len",
+    "avg_word_len",
+    "long_word_ratio",
+    "guiraud_ttr",
+    "p10_zipf",
+    "rare_word_ratio",
+    "nt2_mean_first",
+    "nt2_oov_ratio"
+  ],
+  "labels": [
+    "A1",
+    "A2",
+    "B1",
+    "B2",
+    "C1",
+    "C2"
+  ],
+  "nt2_levels": [
+    "A1",
+    "A2",
+    "B1",
+    "B2",
+    "C1"
+  ],
+  "thresholds": [
+    0.5118,
+    1.6935,
+    2.5554,
+    3.3483,
+    4.1289
+  ],
+  "rare_zipf_threshold": 4.0
+}

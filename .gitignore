@@ -1,0 +1,16 @@
+# Raw source datasets
+data/
+
+# Python & local artifacts
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ipynb_checkpoints/
+.DS_Store
+
+# Keep compiled client-side assets tracked
+!web/dictionary.json
+!web/leesniveau_model.onnx
+!web/model_meta.json
+model/

@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>LeesNiveau — Dutch CEFR Text Grader</title>
+  <link rel="icon" href="data:," />
+  <link rel="stylesheet" href="style.css" />
+  <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.31.1/dist/ort.min.js"></script>
+</head>
+<body>
+  <main class="container">
+    <header class="header">
+      <h1>LeesNiveau</h1>
+      <p class="subtitle">100% client-side Dutch CEFR readability grader powered by WebAssembly &amp; ONNX</p>
+      <p id="status" class="status">Loading model and dictionary...</p>
+    </header>
+
+    <section class="input-section">
+      <div class="sample-bar">
+        <span>Try a sample:</span>
+        <button type="button" class="sample-btn" data-sample="a2">A2 (NOS Makkelijke Taal)</button>
+        <button type="button" class="sample-btn" data-sample="b2">B1–B2 (Nieuws)</button>
+        <button type="button" class="sample-btn" data-sample="c1">C1 (Beleid / Opinie)</button>
+      </div>
+
+      <textarea
+        id="inputText"
+        rows="8"
+        placeholder="Plak hier een Nederlandse tekst (minimaal 30 woorden voor een betrouwbare schatting)..."
+      ></textarea>
+
+      <div class="actions">
+        <button id="gradeBtn" type="button" disabled>Grade Text</button>
+        <button id="clearBtn" type="button" class="secondary-btn">Clear</button>
+      </div>
+    </section>
+
+    <section id="results" hidden>
+      <div class="result-card">
+        <div class="result-header">
+          <div>
+            <span class="result-label">Estimated Level</span>
+            <div class="level-row">
+              <span id="cefrBadge" class="cefr-badge">—</span>
+              <span id="scoreText" class="score-text"></span>
+            </div>
+          </div>
+          <div id="statsGrid" class="stats-grid"></div>
+        </div>
+
+        <div class="scale-wrapper" aria-label="CEFR scale">
+          <div class="scale-bar">
+            <div class="scale-seg seg-a1">A1</div>
+            <div class="scale-seg seg-a2">A2</div>
+            <div class="scale-seg seg-b1">B1</div>
+            <div class="scale-seg seg-b2">B2</div>
+            <div class="scale-seg seg-c1">C1</div>
+            <div class="scale-seg seg-c2">C2</div>
+          </div>
+          <div id="scaleMarker" class="scale-marker" hidden></div>
+        </div>
+
+        <p id="shortWarning" class="warning" hidden>
+          Short text (&lt; 30 words): paste a full paragraph for a more reliable CEFR estimate.
+        </p>
+        <p id="langWarning" class="warning" hidden>
+          Low Dutch word recognition — this text may not be Dutch or contains heavy jargon, so the CEFR estimate may be unreliable.
+        </p>
+      </div>
+
+      <div class="panel">
+        <div class="panel-header">
+          <h2>Annotated Text</h2>
+          <div class="legend">
+            <span class="badge badge-b1">B1</span>
+            <span class="badge badge-b2">B2</span>
+            <span class="badge badge-c1">C1</span>
+            <span class="badge badge-rare">Rare / Compound</span>
+          </div>
+        </div>
+        <div id="annotatedText"></div>
+      </div>
+
+      <div class="panel">
+        <h2>Study Vocabulary (<span id="vocabCount">0</span>)</h2>
+        <ul id="vocabList"></ul>
+      </div>
+    </section>
+
+    <footer class="footer">
+      <p>
+        Runs entirely in your browser — no text leaves your device.
+        Lexical CEFR levels from
+        <a href="https://cental.uclouvain.be/cefrlex/nt2lex/" target="_blank" rel="noopener">NT2Lex</a>
+        (Tack, François, Desmet &amp; Fairon, 2018; CC BY-NC-SA 4.0).
+        Definitions from Wiktionary via kaikki.org (CC BY-SA) and frequencies via wordfreq.
+      </p>
+    </footer>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>
