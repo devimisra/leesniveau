@@ -1,9 +1,27 @@
 export const ABBREV_RE =
   /\b(?:o\.a|bijv|d\.w\.z|i\.p\.v|m\.b\.v|m\.a\.w|t\.o\.v|t\.a\.v|i\.v\.m|n\.a\.v|o\.b\.v|o\.i\.d|e\.d|enz|etc|nl|dr|drs|prof|mr|ir|dhr|mw|mevr|fam|blz|pag|nr|ca|st|max|min|tel|a\.u\.b|s\.v\.p)\./gi;
 export const SENT_SPLIT_RE = /[.!?]+(?:\s+|$)|\r?\n+/;
+export const CLAUSE_SPLIT_RE =
+  /[,;:()–—]+|\b(?:en|maar|want|of|dus|omdat|dat|toen|terwijl|hoewel|indien|zodat|waardoor|waarbij|als|wanneer|omtrent)\b/gi;
 export const WORD_RE = /[A-Za-zÀ-ÖØ-öø-ÿ]+(?:['-][A-Za-zÀ-ÖØ-öø-ÿ]+)*/g;
 export const LONG_TEXT_WORD_LIMIT = 350;
 export const CHUNK_TARGET_WORDS = 200;
+
+export const SEPARABLE_PARTICLES = new Set([
+  "aan", "achter", "af", "bij", "binnen", "boven", "buiten", "door", "gelijk", "goed",
+  "in", "langs", "mee", "mis", "na", "neer", "om", "onder", "op", "open", "over",
+  "rond", "samen", "schoon", "stil", "tegen", "terug", "thuis", "toe", "tussen",
+  "uit", "vast", "voor", "voort", "vrij", "weg", "weer"
+]);
+
+const AUX_OR_STOP_VERBS = new Set([
+  "zijn", "hebben", "worden", "kunnen", "moeten", "zullen", "willen", "mogen",
+  "de", "het", "een", "dat", "die", "wat", "wie", "waar", "hoe"
+]);
+
+function isVerbInfinitive(lemma) {
+  return /(?:en|aan|oen|ijn|ien)$/.test(lemma) && lemma.length >= 5;
+}
 
 // Safe dictionary lookup (guards against JS Object.prototype keys like "constructor")
 export function lookupExact(dictionary, lower) {
@@ -56,6 +74,61 @@ export function resolveEntry(dictionary, rawWord) {
     if (hit) return hit;
   }
   return null;
+}
+
+// Match clause-final separable particle with earlier finite verb in the same clause
+// Returns Map<tokenIndex, { resolved, surfaceLength, role: "verb" | "particle" }>
+export function findSeparableMatches(clauseWords, dictionary) {
+  const matches = new Map();
+  if (clauseWords.length < 2) return matches;
+
+  const lastIdx = clauseWords.length - 1;
+  const particleLower = clauseWords[lastIdx].toLowerCase();
+  if (!SEPARABLE_PARTICLES.has(particleLower)) return matches;
+
+  for (let i = 0; i < lastIdx; i++) {
+    const rawVerb = clauseWords[i];
+    const verbLower = rawVerb.toLowerCase();
+    if (SEPARABLE_PARTICLES.has(verbLower)) continue;
+
+    const verbResolved = resolveEntry(dictionary, rawVerb);
+    const stemLemmas = [];
+    if (verbResolved && isVerbInfinitive(verbResolved.lemma)) {
+      stemLemmas.push(verbResolved.lemma);
+    }
+    // Lightweight fallback for finite verb stems not explicitly linked in Wiktionary
+    for (const suf of ["ten", "den", "te", "de", "t"]) {
+      if (verbLower.endsWith(suf) && verbLower.length - suf.length >= 3) {
+        const root = verbLower.slice(0, -suf.length);
+        stemLemmas.push(root + "en");
+        if (root.length >= 2 && root.at(-1) === root.at(-2)) {
+          stemLemmas.push(root.slice(0, -1) + "en");
+        }
+      }
+    }
+
+    for (const stem of stemLemmas) {
+      if (AUX_OR_STOP_VERBS.has(stem)) continue;
+      const candidate = particleLower + stem;
+      const compHit = lookupExact(dictionary, candidate);
+      if (compHit && (compHit.d || compHit.c !== null)) {
+        const mergedLen = rawVerb.length + clauseWords[lastIdx].length;
+        matches.set(i, { resolved: compHit, surfaceLength: mergedLen, role: "verb" });
+        matches.set(lastIdx, { resolved: compHit, surfaceLength: mergedLen, role: "particle" });
+        return matches;
+      }
+    }
+  }
+
+  return matches;
+}
+
+// Split raw sentence string into word arrays per clause (shared by feature extraction & UI)
+export function splitSentenceClauses(sentenceStr) {
+  return sentenceStr
+    .split(CLAUSE_SPLIT_RE)
+    .map(c => c.match(WORD_RE) || [])
+    .filter(words => words.length > 0);
 }
 
 // UI-only helper: resolve inflected Dutch adjectives/comparatives/superlatives (snellere -> snel, langjarige -> langjarig)
@@ -209,7 +282,8 @@ export function scoreToBarPercent(score, thresholds) {
   return ((idx + frac) / 6) * 100;
 }
 
-// Shared sentence/word tokenizer (1-to-1 with train_model.py)
+// Shared sentence/clause tokenizer (1-to-1 with train_model.py)
+// Returns array of sentences, where each sentence is an array of clause word arrays
 export function splitSentences(text) {
   const cleaned = text
     .trim()
@@ -220,17 +294,45 @@ export function splitSentences(text) {
     .split(SENT_SPLIT_RE)
     .map(s => s.trim())
     .filter(Boolean)
-    .map(s => s.match(WORD_RE) || [])
-    .filter(words => words.length > 0);
+    .map(s => splitSentenceClauses(s))
+    .filter(clauses => clauses.length > 0);
 }
 
-// Compute the 10-feature vector + UI stats from tokenized sentences
-export function extractFeaturesFromSentences(sentWordLists, dictionary, modelMeta) {
+// Compute the 11-feature vector + UI stats from tokenized sentence clauses
+export function extractFeaturesFromSentences(sentClauseLists, dictionary, modelMeta) {
   const rareThreshold = modelMeta.rare_zipf_threshold ?? 4.0;
-  const sentLengths = sentWordLists.map(w => w.length);
-  const allWords = sentWordLists.flat();
+  const sentLengths = [];
+  const mergedTokens = []; // { wordLen, resolved, rawLower }
 
-  const numWords = allWords.length;
+  for (const clauses of sentClauseLists) {
+    let sentWordCount = 0;
+    for (const clauseWords of clauses) {
+      const sepMatches = findSeparableMatches(clauseWords, dictionary);
+      for (let i = 0; i < clauseWords.length; i++) {
+        const sep = sepMatches.get(i);
+        if (sep) {
+          if (sep.role === "particle") continue;
+          sentWordCount++;
+          mergedTokens.push({
+            wordLen: sep.surfaceLength,
+            resolved: sep.resolved,
+            rawLower: sep.resolved.lemma
+          });
+        } else {
+          const w = clauseWords[i];
+          sentWordCount++;
+          mergedTokens.push({
+            wordLen: w.length,
+            resolved: resolveEntry(dictionary, w),
+            rawLower: w.toLowerCase()
+          });
+        }
+      }
+    }
+    if (sentWordCount > 0) sentLengths.push(sentWordCount);
+  }
+
+  const numWords = mergedTokens.length;
   const numSents = sentLengths.length;
   if (numWords === 0 || numSents === 0) return null;
 
@@ -239,8 +341,8 @@ export function extractFeaturesFromSentences(sentWordLists, dictionary, modelMet
   const variance = sentLengths.reduce((sum, len) => sum + (len - avgSentLen) ** 2, 0) / numSents;
   const stdSentLen = Math.sqrt(variance);
 
-  const avgWordLen = allWords.reduce((sum, w) => sum + w.length, 0) / numWords;
-  const longWordRatio = allWords.filter(w => w.length >= 10).length / numWords;
+  const avgWordLen = mergedTokens.reduce((sum, t) => sum + t.wordLen, 0) / numWords;
+  const longWordRatio = mergedTokens.filter(t => t.wordLen >= 10).length / numWords;
 
   const uniqueLemmas = new Set();
   const validZipf = [];
@@ -248,10 +350,11 @@ export function extractFeaturesFromSentences(sentWordLists, dictionary, modelMet
   let knownDictWords = 0;
   let nt2A1A2 = 0;
   let nt2B2Plus = 0;
-  let nt2Oov = 0;
+  let rareNt2Oov = 0;
+  let commonNt2Oov = 0;
 
-  for (const w of allWords) {
-    const resolved = resolveEntry(dictionary, w);
+  for (const tok of mergedTokens) {
+    const resolved = tok.resolved;
     if (resolved) {
       knownDictWords++;
       uniqueLemmas.add(resolved.lemma);
@@ -260,12 +363,14 @@ export function extractFeaturesFromSentences(sentWordLists, dictionary, modelMet
         nt2FirstScores.push(resolved.c);
         if (resolved.c <= 1) nt2A1A2++;
         else if (resolved.c >= 3) nt2B2Plus++;
+      } else if (resolved.z > 0 && resolved.z >= rareThreshold) {
+        commonNt2Oov++;
       } else {
-        nt2Oov++;
+        rareNt2Oov++;
       }
     } else {
-      uniqueLemmas.add(w.toLowerCase());
-      nt2Oov++;
+      uniqueLemmas.add(tok.rawLower);
+      rareNt2Oov++;
     }
   }
 
@@ -294,7 +399,8 @@ export function extractFeaturesFromSentences(sentWordLists, dictionary, modelMet
       p10Zipf,
       rareWordRatio,
       nt2MeanFirst,
-      nt2Oov / numWords
+      rareNt2Oov / numWords,
+      commonNt2Oov / numWords
     ],
     stats: {
       numWords,
@@ -307,14 +413,15 @@ export function extractFeaturesFromSentences(sentWordLists, dictionary, modelMet
 }
 
 // Group long texts (> 350 words) into ~200-word chunks matching training distribution
-export function buildChunks(sentWordLists) {
+export function buildChunks(sentClauseLists) {
   const chunks = [];
   let cur = [];
   let curWords = 0;
 
-  for (const words of sentWordLists) {
-    cur.push(words);
-    curWords += words.length;
+  for (const clauses of sentClauseLists) {
+    const sentWords = clauses.reduce((sum, c) => sum + c.length, 0);
+    cur.push(clauses);
+    curWords += sentWords;
     if (curWords >= CHUNK_TARGET_WORDS) {
       chunks.push({ sents: cur, words: curWords });
       cur = [];
@@ -332,11 +439,10 @@ export function buildChunks(sentWordLists) {
   return chunks;
 }
 
-// Classify a token for UI vocabulary highlighting (B1+, rare non-NT2, or unlisted compound)
-export function classifyVocabToken(segment, dictionary, modelMeta) {
+// Classify a resolved entry or surface token for UI vocabulary highlighting
+export function classifyResolvedEntry(resolved, rawSegment, dictionary, modelMeta) {
   const rareThreshold = modelMeta.rare_zipf_threshold ?? 4.0;
   const nt2Labels = modelMeta.nt2_levels || ["A1", "A2", "B1", "B2", "C1"];
-  const resolved = resolveEntry(dictionary, segment) || resolveInflectedUi(dictionary, segment);
 
   if (resolved && resolved.c !== null) {
     if (resolved.c <= 1 || resolved.z >= 5.5) return null;
@@ -346,7 +452,7 @@ export function classifyVocabToken(segment, dictionary, modelMeta) {
     let definition = resolved.d;
 
     if (!definition) {
-      const comp = splitCompound(dictionary, segment);
+      const comp = splitCompound(dictionary, rawSegment);
       definition = comp ? comp.d : "NT2Lex vocabulary (no English gloss available)";
     }
 
@@ -372,7 +478,7 @@ export function classifyVocabToken(segment, dictionary, modelMeta) {
   }
 
   if (!resolved || !resolved.d) {
-    const compound = splitCompound(dictionary, segment);
+    const compound = splitCompound(dictionary, rawSegment);
     if (compound) {
       return {
         key: compound.lemma,
@@ -386,4 +492,9 @@ export function classifyVocabToken(segment, dictionary, modelMeta) {
   }
 
   return null;
+}
+
+export function classifyVocabToken(segment, dictionary, modelMeta) {
+  const resolved = resolveEntry(dictionary, segment) || resolveInflectedUi(dictionary, segment);
+  return classifyResolvedEntry(resolved, segment, dictionary, modelMeta);
 }

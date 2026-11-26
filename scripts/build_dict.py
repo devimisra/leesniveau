@@ -1,11 +1,27 @@
 import csv
 import json
+import re
 from wordfreq import zipf_frequency
 
 WIKT_PATH = "../data/kaikki.org-dictionary-Dutch.jsonl"
 NT2_PATH = "../data/NT2Lex-CGN-v01.tsv"
 OUTPUT_FILE = "../web/dictionary.json"
 NT2_LEVELS = ["A1", "A2", "B1", "B2", "C1"]
+
+MAX_GLOSSES = 3
+MAX_DEF_CHARS = 95
+FORM_OF_PREFIXES = (
+    "plural of ",
+    "inflection of ",
+    "past tense of ",
+    "past participle of ",
+    "present participle of ",
+    "diminutive of ",
+    "comparative of ",
+    "superlative of ",
+    "alternative spelling of ",
+    "alternative form of ",
+)
 
 
 def parse_num(val):
@@ -17,9 +33,41 @@ def parse_num(val):
         return 0.0
 
 
+def clean_gloss(raw: str) -> str:
+    text = re.sub(r"\s+", " ", raw).strip().rstrip(".:")
+    return text
+
+
+def is_redundant_gloss(candidate: str, existing: list[str]) -> bool:
+    cand_norm = candidate.lower()
+    if cand_norm.startswith(FORM_OF_PREFIXES):
+        return True
+    for prev in existing:
+        prev_norm = prev.lower()
+        if cand_norm == prev_norm:
+            return True
+        if cand_norm.startswith(prev_norm + " (") or prev_norm.startswith(cand_norm + " ("):
+            return True
+    return False
+
+
+def format_gloss_list(glosses: list[str]) -> str:
+    chosen = []
+    total_len = 0
+    for g in glosses:
+        sep_len = 2 if chosen else 0
+        if chosen and total_len + sep_len + len(g) > MAX_DEF_CHARS:
+            continue
+        chosen.append(g)
+        total_len += sep_len + len(g)
+        if len(chosen) >= MAX_GLOSSES:
+            break
+    return "; ".join(chosen)
+
+
 print("1. Pass 1: Reading Wiktionary entries...")
-base_defs = {}
-lemma_links = {}
+raw_defs: dict[str, list[str]] = {}
+lemma_links: dict[str, list[str]] = {}
 
 with open(WIKT_PATH, "r", encoding="utf-8") as f:
     for line in f:
@@ -41,10 +89,22 @@ with open(WIKT_PATH, "r", encoding="utf-8") as f:
                     targets = lemma_links.setdefault(word, [])
                     if target not in targets:
                         targets.append(target)
-            elif glosses and word not in base_defs:
-                clean_def = glosses[0].strip()
-                if not clean_def.endswith(":"):
-                    base_defs[word] = clean_def
+            elif glosses:
+                raw_text = glosses[0].strip()
+                if not raw_text or raw_text.endswith(":"):
+                    continue
+                cleaned = clean_gloss(raw_text)
+                if not cleaned:
+                    continue
+                bucket = raw_defs.setdefault(word, [])
+                if len(bucket) < MAX_GLOSSES + 2 and not is_redundant_gloss(cleaned, bucket):
+                    bucket.append(cleaned)
+
+base_defs = {
+    word: formatted
+    for word, g_list in raw_defs.items()
+    if (formatted := format_gloss_list(g_list))
+}
 
 print(f"   Found {len(base_defs)} base lemmas and {len(lemma_links)} words with inflection links.")
 
@@ -129,11 +189,14 @@ assert all(
     for v in mini_dict.values()
 ), "Invalid entry detected in dictionary!"
 
-# Quick homograph sanity check
+# Quick homograph & multi-sense sanity checks
 for check_word in ("meer", "was", "kan", "wil"):
     entry = mini_dict.get(check_word, {})
     lvl = NT2_LEVELS[entry["c"]] if "c" in entry else "None"
     print(f"   Homograph check '{check_word}': level={lvl}, z={entry.get('z')}")
+
+for check_word in ("kabinet", "regel", "kosten"):
+    print(f"   Multi-sense check '{check_word}': {mini_dict.get(check_word, {}).get('d')}")
 
 print(
     f"4. Saving {len(mini_dict)} entries "

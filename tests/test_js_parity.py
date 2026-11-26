@@ -1,8 +1,6 @@
 import ast
 import json
-import math
 from pathlib import Path
-import re
 import shutil
 import subprocess
 import numpy as np
@@ -11,13 +9,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 WEB_DIR = ROOT / "web"
-
-ABBREV_RE = re.compile(
-    r"\b(?:o\.a|bijv|d\.w\.z|i\.p\.v|m\.b\.v|m\.a\.w|t\.o\.v|t\.a\.v|i\.v\.m|n\.a\.v|o\.b\.v|o\.i\.d|e\.d|enz|etc|nl|dr|drs|prof|mr|ir|dhr|mw|mevr|fam|blz|pag|nr|ca|st|max|min|tel|a\.u\.b|s\.v\.p)\.",
-    re.IGNORECASE,
-)
-SENT_SPLIT_RE = re.compile(r"[.!?]+(?:\s+|$)|\r?\n+")
-WORD_RE = re.compile(r"[A-Za-zÀ-ÖØ-öø-ÿ]+(?:['-][A-Za-zÀ-ÖØ-öø-ÿ]+)*")
+SCRIPTS_DIR = ROOT / "scripts"
 
 TEST_TEXTS = {
     "a2_sample": (
@@ -41,106 +33,31 @@ TEST_TEXTS = {
         "Prof. dr. Van Dijk besprak o.a. de nieuwe auto's, foto's en e-mails van het ministerie, "
         "d.w.z. alle documenten m.b.t. duurzame energie-efficiëntie in Nederland."
     ),
+    "separable_verbs": (
+        "De minister stelde het moeilijke besluit gisteren uit, "
+        "maar de oppositie riep het kabinet direct ter verantwoording op."
+    ),
     "prototype_guard": "De constructor van het gebouw is nog niet bekend.",
 }
 
 
-def load_train_extractor():
-    """Safely load extract_features from train_model.py without triggering top-level training."""
-    train_path = ROOT / "train_model.py"
-    if not train_path.exists():
-        return None
+def load_train_module(dictionary: dict):
+    """Safely load constants & feature functions from scripts/train_model.py."""
+    train_path = SCRIPTS_DIR / "train_model.py"
     source = train_path.read_text(encoding="utf-8")
     tree = ast.parse(source, filename=str(train_path))
-    safe_nodes = [
-        node
-        for node in tree.body
-        if isinstance(node, (ast.Import, ast.ImportFrom, ast.FunctionDef, ast.Assign))
-    ]
+    safe_nodes = []
+    for node in tree.body:
+        if isinstance(node, (ast.Import, ast.ImportFrom, ast.FunctionDef)):
+            safe_nodes.append(node)
+        elif isinstance(node, ast.Assign):
+            if all(isinstance(t, ast.Name) and t.id.isupper() and t.id != "X" for t in node.targets):
+                safe_nodes.append(node)
     safe_mod = ast.Module(body=safe_nodes, type_ignores=[])
-    ns = {}
+    ns = {"dictionary": dictionary}
     exec(compile(safe_mod, str(train_path), "exec"), ns)
-    return ns.get("extract_features")
-
-
-def python_extract_features(text: str, dictionary: dict, meta: dict) -> list[float]:
-    rare_threshold = meta.get("rare_zipf_threshold", 4.0)
-    cleaned = ABBREV_RE.sub(lambda m: m.group(0).replace(".", "·"), text.strip().replace("’", "'"))
-    sents = [s.strip() for s in SENT_SPLIT_RE.split(cleaned) if s.strip()]
-    sent_words = [WORD_RE.findall(s) for s in sents if WORD_RE.findall(s)]
-    all_words = [w for sw in sent_words for w in sw]
-
-    num_words = len(all_words)
-    num_sents = len(sent_words)
-    sent_lens = [len(sw) for sw in sent_words]
-
-    avg_sent_len = num_words / num_sents
-    max_sent_len = float(max(sent_lens))
-    std_sent_len = float(np.std(sent_lens))
-    avg_word_len = float(np.mean([len(w) for w in all_words]))
-    long_word_ratio = float(np.mean([len(w) >= 10 for w in all_words]))
-
-    unique_lemmas = set()
-    valid_zipf = []
-    nt2_scores = []
-    nt2_oov = 0
-
-    for w in all_words:
-        lower = w.lower().replace("’", "'")
-        entry = dictionary.get(lower)
-        if entry is None and lower.endswith("'s") and len(lower) > 3:
-            entry = dictionary.get(lower[:-2])
-            if entry is not None:
-                lower = lower[:-2]
-        if entry is None and "-" in lower:
-            entry = dictionary.get(lower.replace("-", ""))
-            if entry is not None:
-                lower = lower.replace("-", "")
-
-        if entry:
-            if "l" in entry:
-                base_word = entry["l"]
-                base = dictionary.get(base_word)
-                if base:
-                    unique_lemmas.add(base_word)
-                    z = base.get("z", 0)
-                    c = base.get("c", entry.get("c"))
-                else:
-                    unique_lemmas.add(lower)
-                    z = 0
-                    c = entry.get("c")
-            else:
-                unique_lemmas.add(lower)
-                z = entry.get("z", 0)
-                c = entry.get("c")
-
-            if z > 0:
-                valid_zipf.append(z)
-            if c is not None:
-                nt2_scores.append(c)
-            else:
-                nt2_oov += 1
-        else:
-            unique_lemmas.add(w.lower())
-            nt2_oov += 1
-
-    guiraud_ttr = len(unique_lemmas) / math.sqrt(num_words)
-    p10_zipf = float(np.percentile(valid_zipf, 10)) if valid_zipf else 0.0
-    rare_word_ratio = float(np.mean([z < rare_threshold for z in valid_zipf])) if valid_zipf else 0.0
-    nt2_mean_first = float(np.mean(nt2_scores)) if nt2_scores else 4.0
-
-    return [
-        avg_sent_len,
-        max_sent_len,
-        std_sent_len,
-        avg_word_len,
-        long_word_ratio,
-        guiraud_ttr,
-        p10_zipf,
-        rare_word_ratio,
-        nt2_mean_first,
-        nt2_oov / num_words,
-    ]
+    ns["dictionary"] = dictionary
+    return ns
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is required for JS parity check")
@@ -152,13 +69,15 @@ def test_python_js_feature_and_onnx_parity(tmp_path):
 
     dictionary = json.loads(dict_path.read_text(encoding="utf-8"))
     meta = json.loads(meta_path.read_text(encoding="utf-8"))
-    train_extractor = load_train_extractor()
+    train_ns = load_train_module(dictionary)
+    py_extract = train_ns["extract_features"]
 
     node_script = """
     import fs from "node:fs";
     import {
       splitSentences,
       extractFeaturesFromSentences,
+      findSeparableMatches,
       classifyVocabToken
     } from "./features.mjs";
 
@@ -172,11 +91,15 @@ def test_python_js_feature_and_onnx_parity(tmp_path):
       featuresOut[key] = extractFeaturesFromSentences(sents, dictionary, meta);
     }
 
+    const sepClause = ["De", "minister", "stelde", "het", "besluit", "uit"];
+    const sepMap = findSeparableMatches(sepClause, dictionary);
+
     const uiChecks = {
       snellere: classifyVocabToken("snellere", dictionary, meta),
       langjarige: classifyVocabToken("langjarige", dictionary, meta),
       heroverweging: classifyVocabToken("heroverweging", dictionary, meta),
       industriestrategie: classifyVocabToken("industriestrategie", dictionary, meta),
+      separableLemma: sepMap.get(2)?.resolved?.lemma ?? null,
     };
 
     console.log(JSON.stringify({ featuresOut, uiChecks }));
@@ -200,9 +123,10 @@ def test_python_js_feature_and_onnx_parity(tmp_path):
     input_name = sess.get_inputs()[0].name
 
     for key, text in TEST_TEXTS.items():
-        py_feats = python_extract_features(text, dictionary, meta)
+        py_feats = py_extract(text)
         js_feats = js_result["featuresOut"][key]["features"]
 
+        assert len(py_feats) == len(meta["features"]) == 11
         np.testing.assert_allclose(
             js_feats,
             py_feats,
@@ -211,17 +135,14 @@ def test_python_js_feature_and_onnx_parity(tmp_path):
             err_msg=f"Feature mismatch between Python and JS for '{key}'",
         )
 
-        if callable(train_extractor):
-            train_feats = train_extractor(text, dictionary, meta)
-            np.testing.assert_allclose(js_feats, train_feats, rtol=1e-6, atol=1e-6)
-
         py_score = float(sess.run(None, {input_name: np.array([py_feats], dtype=np.float32)})[0].item())
         js_score = float(sess.run(None, {input_name: np.array([js_feats], dtype=np.float32)})[0].item())
         assert abs(py_score - js_score) < 1e-5
 
-    # Verify UI morphological & compound guards stay intact
+    # Verify UI morphological, compound, and separable-verb guards stay intact
     ui = js_result["uiChecks"]
     assert ui["snellere"] is None  # resolves to A1/A2 'snel', not 'snel + leren'
     assert ui["langjarige"] is None or ui["langjarige"]["badge"] != "Compound"
     assert ui["heroverweging"]["definition"].startswith("her- (re-)")
     assert ui["industriestrategie"]["badge"] == "Compound"
+    assert ui["separableLemma"] == "uitstellen"

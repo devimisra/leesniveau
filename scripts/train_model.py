@@ -19,7 +19,7 @@ DICT_PATH = "../web/dictionary.json"
 ONNX_OUT = "../web/leesniveau_model.onnx"
 META_OUT = "../web/model_meta.json"
 
-MODEL_VERSION = "1.3.1"
+MODEL_VERSION = "1.5.1"
 CEFR_ORDER = ["A1", "A2", "B1", "B2", "C1", "C2"]
 NT2_LEVELS = ["A1", "A2", "B1", "B2", "C1"]
 CEFR_MAP = {lvl: i for i, lvl in enumerate(CEFR_ORDER)}
@@ -28,7 +28,7 @@ FEATURES = [
     "avg_sent_len", "max_sent_len", "std_sent_len",
     "avg_word_len", "long_word_ratio", "guiraud_ttr",
     "p10_zipf", "rare_word_ratio",
-    "nt2_mean_first", "nt2_oov_ratio",
+    "nt2_mean_first", "rare_nt2_oov_ratio", "common_nt2_oov_ratio",
 ]
 
 ABBREV_RE = re.compile(
@@ -38,8 +38,32 @@ ABBREV_RE = re.compile(
     re.IGNORECASE,
 )
 SENT_SPLIT_RE = re.compile(r"[.!?]+(?:\s+|$)|\r?\n+")
+CLAUSE_SPLIT_RE = re.compile(
+    r"[,;:()–—]+|\b(?:en|maar|want|of|dus|omdat|dat|toen|terwijl|hoewel|"
+    r"indien|zodat|waardoor|waarbij|als|wanneer|omtrent)\b",
+    re.IGNORECASE,
+)
 WORD_RE = re.compile(r"[A-Za-zÀ-ÖØ-öø-ÿ]+(?:['-][A-Za-zÀ-ÖØ-öø-ÿ]+)*")
 RARE_ZIPF_THRESHOLD = 4.0
+
+SEPARABLE_PARTICLES = {
+    "aan", "achter", "af", "bij", "binnen", "boven", "buiten", "door", "gelijk", "goed",
+    "in", "langs", "mee", "mis", "na", "neer", "om", "onder", "op", "open", "over",
+    "rond", "samen", "schoon", "stil", "tegen", "terug", "thuis", "toe", "tussen",
+    "uit", "vast", "voor", "voort", "vrij", "weg", "weer",
+}
+
+AUX_OR_STOP_VERBS = {
+    "zijn", "hebben", "worden", "kunnen", "moeten", "zullen", "willen", "mogen",
+    "de", "het", "een", "dat", "die", "wat", "wie", "waar", "hoe",
+}
+
+VERB_INF_RE = re.compile(r"(?:en|aan|oen|ijn|ien)$")
+
+
+def is_verb_infinitive(lemma: str) -> bool:
+    return bool(VERB_INF_RE.search(lemma)) and len(lemma) >= 5
+
 
 print("1. Loading unified dictionary.json and dataset...")
 with open(DICT_PATH, "r", encoding="utf-8") as f:
@@ -75,7 +99,6 @@ def resolve_entry(word):
     hit = _lookup_exact(lower)
     if hit:
         return hit
-    # Handle Dutch 's plurals (auto's -> auto) and optional hyphens (e-mail -> email)
     if lower.endswith("'s") and len(lower) > 3:
         hit = _lookup_exact(lower[:-2])
         if hit:
@@ -87,19 +110,83 @@ def resolve_entry(word):
     return None
 
 
+def find_separable_matches(clause_words):
+    matches = {}
+    if len(clause_words) < 2:
+        return matches
+
+    last_idx = len(clause_words) - 1
+    particle_lower = clause_words[last_idx].lower()
+    if particle_lower not in SEPARABLE_PARTICLES:
+        return matches
+
+    for i in range(last_idx):
+        raw_verb = clause_words[i]
+        verb_lower = raw_verb.lower()
+        if verb_lower in SEPARABLE_PARTICLES:
+            continue
+
+        verb_resolved = resolve_entry(raw_verb)
+        stem_lemmas = []
+        if verb_resolved and is_verb_infinitive(verb_resolved[0]):
+            stem_lemmas.append(verb_resolved[0])
+
+        for suf in ("ten", "den", "te", "de", "t"):
+            if verb_lower.endswith(suf) and len(verb_lower) - len(suf) >= 3:
+                root = verb_lower[:-len(suf)]
+                stem_lemmas.append(root + "en")
+                if len(root) >= 2 and root[-1] == root[-2]:
+                    stem_lemmas.append(root[:-1] + "en")
+
+        for stem in stem_lemmas:
+            if stem in AUX_OR_STOP_VERBS:
+                continue
+            candidate = particle_lower + stem
+            comp_hit = _lookup_exact(candidate)
+            if comp_hit and (candidate in dictionary and ("d" in dictionary[candidate] or "c" in dictionary[candidate] or "l" in dictionary[candidate])):
+                merged_len = len(raw_verb) + len(clause_words[last_idx])
+                matches[i] = (comp_hit, merged_len, "verb")
+                matches[last_idx] = (comp_hit, merged_len, "particle")
+                return matches
+
+    return matches
+
+
+def split_sentence_clauses(sentence_str):
+    return [words for c in CLAUSE_SPLIT_RE.split(sentence_str) if (words := WORD_RE.findall(c))]
+
+
 def split_sentences(text):
     cleaned = text.strip().replace("’", "'")
     cleaned = ABBREV_RE.sub(lambda m: m.group(0).replace(".", "·"), cleaned)
     raw_sentences = [s.strip() for s in SENT_SPLIT_RE.split(cleaned) if s.strip()]
-    return [words for s in raw_sentences if (words := WORD_RE.findall(s))]
+    return [clauses for s in raw_sentences if (clauses := split_sentence_clauses(s))]
 
 
 def extract_features(text):
-    sent_word_lists = split_sentences(text)
-    sent_lengths = [len(w) for w in sent_word_lists]
-    all_words = [w for words in sent_word_lists for w in words]
+    sent_clause_lists = split_sentences(text)
+    sent_lengths = []
+    merged_tokens = []  # (word_len, resolved_tuple_or_None, raw_lower)
 
-    num_words = len(all_words)
+    for clauses in sent_clause_lists:
+        sent_word_count = 0
+        for clause_words in clauses:
+            sep_matches = find_separable_matches(clause_words)
+            for i, w in enumerate(clause_words):
+                sep = sep_matches.get(i)
+                if sep:
+                    comp_hit, merged_len, role = sep
+                    if role == "particle":
+                        continue
+                    sent_word_count += 1
+                    merged_tokens.append((merged_len, comp_hit, comp_hit[0]))
+                else:
+                    sent_word_count += 1
+                    merged_tokens.append((len(w), resolve_entry(w), w.lower()))
+        if sent_word_count > 0:
+            sent_lengths.append(sent_word_count)
+
+    num_words = len(merged_tokens)
     num_sents = len(sent_lengths)
     if num_words == 0 or num_sents == 0:
         return [0.0] * len(FEATURES)
@@ -107,16 +194,16 @@ def extract_features(text):
     avg_sent_len = num_words / num_sents
     max_sent_len = float(max(sent_lengths))
     std_sent_len = float(np.std(sent_lengths))
-    avg_word_len = sum(len(w) for w in all_words) / num_words
-    long_word_ratio = sum(1 for w in all_words if len(w) >= 10) / num_words
+    avg_word_len = sum(t[0] for t in merged_tokens) / num_words
+    long_word_ratio = sum(1 for t in merged_tokens if t[0] >= 10) / num_words
 
     unique_lemmas = set()
     valid_zipf = []
     nt2_first_scores = []
-    nt2_oov = 0
+    rare_nt2_oov = 0
+    common_nt2_oov = 0
 
-    for w in all_words:
-        resolved = resolve_entry(w)
+    for _, resolved, raw_lower in merged_tokens:
         if resolved:
             lemma, z, c = resolved
             unique_lemmas.add(lemma)
@@ -124,11 +211,13 @@ def extract_features(text):
                 valid_zipf.append(z)
             if c is not None:
                 nt2_first_scores.append(c)
+            elif z > 0 and z >= RARE_ZIPF_THRESHOLD:
+                common_nt2_oov += 1
             else:
-                nt2_oov += 1
+                rare_nt2_oov += 1
         else:
-            unique_lemmas.add(w.lower())
-            nt2_oov += 1
+            unique_lemmas.add(raw_lower)
+            rare_nt2_oov += 1
 
     guiraud_ttr = len(unique_lemmas) / math.sqrt(num_words)
 
@@ -144,7 +233,7 @@ def extract_features(text):
         avg_sent_len, max_sent_len, std_sent_len,
         avg_word_len, long_word_ratio, guiraud_ttr,
         p10_zipf, rare_word_ratio,
-        nt2_mean_first, nt2_oov / num_words,
+        nt2_mean_first, rare_nt2_oov / num_words, common_nt2_oov / num_words,
     ]
 
 
@@ -178,7 +267,7 @@ def build_model():
     )
 
 
-print(f"2. Extracting 10 pruned JS-parity features (v{MODEL_VERSION}) for {len(df)} texts...")
+print(f"2. Extracting 11 JS-parity features (v{MODEL_VERSION}) for {len(df)} texts...")
 X = np.array([extract_features(t) for t in df["text"]], dtype=np.float32)
 
 print("3. Validating naive vs. tuned thresholds (5-fold CV)...")
@@ -220,7 +309,7 @@ else:
     final_thresholds = naive_thresholds
     print(f"   -> Keeping naive thresholds: {final_thresholds}")
 
-print("4. Training final 10-feature (200-tree) model & exporting ONNX...")
+print("4. Training final 11-feature (200-tree) model & exporting ONNX...")
 sw_full = np.sqrt(compute_sample_weight("balanced", y))
 final_model = build_model()
 final_model.fit(X, y, sample_weight=sw_full)
@@ -256,5 +345,5 @@ pred_label = CEFR_ORDER[int(apply_thresholds([raw_score], final_thresholds)[0])]
 
 print("\n5. Python Parity Check (NOS Journaal snippet):")
 for fname, val in zip(FEATURES, sample_feats[0]):
-    print(f"   {fname:16s}: {val:.4f}")
-print(f"   Raw Score       : {raw_score:.4f} -> {pred_label}")
+    print(f"   {fname:20s}: {val:.4f}")
+print(f"   Raw Score           : {raw_score:.4f} -> {pred_label}")

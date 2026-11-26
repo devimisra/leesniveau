@@ -1,5 +1,6 @@
 import {
   WORD_RE,
+  CLAUSE_SPLIT_RE,
   LONG_TEXT_WORD_LIMIT,
   applyThresholds,
   getBorderlineNote,
@@ -7,6 +8,8 @@ import {
   splitSentences,
   extractFeaturesFromSentences,
   buildChunks,
+  findSeparableMatches,
+  classifyResolvedEntry,
   classifyVocabToken
 } from "./features.js?v=1.5.0";
 
@@ -137,13 +140,39 @@ function renderVocabulary(text) {
   for (const { segment: sentence } of sentSegmenter.segment(text)) {
     const cleanContext = sentence.replace(/\s+/g, " ").trim();
 
+    // Pre-detect separable verb pairs per clause inside this sentence
+    const sepOverrideQueue = [];
+    for (const clauseStr of sentence.split(CLAUSE_SPLIT_RE)) {
+      const clauseWords = clauseStr.match(WORD_RE) || [];
+      const sepMatches = findSeparableMatches(clauseWords, dictionary);
+      for (let i = 0; i < clauseWords.length; i++) {
+        sepOverrideQueue.push({
+          surface: clauseWords[i],
+          sep: sepMatches.get(i) || null
+        });
+      }
+    }
+    let qIdx = 0;
+
     for (const { segment, isWordLike } of wordSegmenter.segment(sentence)) {
       if (!isWordLike) {
         html += escapeHtml(segment);
         continue;
       }
 
-      const item = classifyVocabToken(segment, dictionary, modelMeta);
+      let sepOverride = null;
+      while (qIdx < sepOverrideQueue.length) {
+        const entry = sepOverrideQueue[qIdx++];
+        if (entry.surface === segment) {
+          sepOverride = entry.sep;
+          break;
+        }
+      }
+
+      const item = sepOverride
+        ? classifyResolvedEntry(sepOverride.resolved, sepOverride.resolved.lemma, dictionary, modelMeta)
+        : classifyVocabToken(segment, dictionary, modelMeta);
+
       if (item) {
         const tooltip = escapeHtml(`[${item.badge}] ${item.word}: ${item.definition}`);
         html += `<span class="hl hl-${item.cssKey}" title="${tooltip}">${escapeHtml(segment)}</span>`;
@@ -155,7 +184,7 @@ function renderVocabulary(text) {
       }
     }
   }
-
+  
   annotatedTextEl.innerHTML = html;
 
   const sortedItems = [...vocabMap.values()].sort(
