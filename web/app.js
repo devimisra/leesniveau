@@ -144,6 +144,26 @@ function splitCompound(rawWord) {
   if (rawWord.length < 6 || /^[A-Z0-9]+$/.test(rawWord)) return null;
 
   const lower = rawWord.toLowerCase();
+  const prefixes = [
+    ["her", "re-"],
+    ["wan", "mis- / bad"],
+    ["mis", "mis- / wrong"]
+  ];
+  for (const [pref, gloss] of prefixes) {
+    if (lower.startsWith(pref) && lower.length - pref.length >= 4) {
+      const stem = resolveEntry(lower.slice(pref.length));
+      if (stem && stem.d && stem.z >= 2.5) {
+        return {
+          lemma: lower,
+          d: `${pref}- (${gloss}) + ${stem.lemma} (${stem.d})`,
+          z: stem.z,
+          c: null,
+          isCompound: true
+        };
+      }
+    }
+  }
+
   const linkers = ["", "s", "e", "en"];
   let best = null;
 
