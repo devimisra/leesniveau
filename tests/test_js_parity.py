@@ -42,19 +42,25 @@ TEST_TEXTS = {
 
 
 def load_train_module(dictionary: dict):
-    """Safely load constants & feature functions from scripts/train_model.py."""
+    """Safely load constants & feature functions from scripts/train_model.py without training imports."""
     train_path = SCRIPTS_DIR / "train_model.py"
     source = train_path.read_text(encoding="utf-8")
     tree = ast.parse(source, filename=str(train_path))
     safe_nodes = []
     for node in tree.body:
-        if isinstance(node, (ast.Import, ast.ImportFrom, ast.FunctionDef)):
+        if isinstance(node, ast.FunctionDef):
             safe_nodes.append(node)
         elif isinstance(node, ast.Assign):
             if all(isinstance(t, ast.Name) and t.id.isupper() and t.id != "X" for t in node.targets):
                 safe_nodes.append(node)
     safe_mod = ast.Module(body=safe_nodes, type_ignores=[])
-    ns = {"dictionary": dictionary}
+    ns = {
+        "json": json,
+        "math": __import__("math"),
+        "re": __import__("re"),
+        "np": np,
+        "dictionary": dictionary,
+    }
     exec(compile(safe_mod, str(train_path), "exec"), ns)
     ns["dictionary"] = dictionary
     return ns
