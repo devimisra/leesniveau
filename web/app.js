@@ -32,7 +32,16 @@ const SAMPLES = {
     "De toenemende verwevenheid van geopolitieke belangen en mondiale toeleveringsketens dwingt Europese beleidsmakers " +
     "tot een fundamentele heroverweging van hun industriestrategie. Waar decennialang werd uitgegaan van ongehinderde " +
     "marktintegratie als waarborg voor welvaart, verschuift de nadruk thans naar strategische autonomie en weerbaarheid. " +
-    "Deze koerswijziging roept echter complexe vraagstukken op omtrent mededinging, subsidies en de verdeling van maatschappelijke lasten."
+    "Deze koerswijziging roept echter complexe vraagstukken op omtrent mededinging, staatssteun en de rechtvaardige verdeling van maatschappelijke lasten.\n\n" +
+    "Bovendien waarschuwen economen dat een ongecoördineerde wedloop om subsidies niet alleen de begrotingsdiscipline ondermijnt, " +
+    "maar ook het gelijke speelveld binnen de interne markt verstoort doordat lidstaten met omvangrijke financiële buffers hun eigen " +
+    "sleuteltechnologieën aanzienlijk royaler kunnen ondersteunen dan kleinere economieën. Tegelijkertijd vergt de verduurzaming van " +
+    "energie-intensieve sectoren langjarige investeringszekerheid, heldere vergunningskaders en hoogwaardige kennisinfrastructuur. " +
+    "Zonder een samenhangende Europese aanpak dreigt het continent immers zowel zijn concurrentievermogen als zijn technologische " +
+    "slagkracht op de langere termijn te verliezen.\n\n" +
+    "Het kabinet pleit daarom voor gerichte publiek-private samenwerking, waarbij schaarse overheidsmiddelen uitsluitend worden ingezet " +
+    "voor hoogwaardige innovaties die zonder publieke cofinanciering onvoldoende van de grond komen en waarvan de maatschappelijke baten " +
+    "breder neerslaan dan bij individuele ondernemingen alleen."
 };
 
 const statusEl = document.getElementById("status");
@@ -139,6 +148,60 @@ function resolveEntry(rawWord) {
   return null;
 }
 
+// UI-only helper: resolve inflected Dutch adjectives/comparatives/superlatives (snellere -> snel, langjarige -> langjarig)
+function resolveInflectedUi(rawWord) {
+  const lower = rawWord.toLowerCase().replace(/’/g, "'");
+  if (lower.length < 5) return null;
+
+  const vowels = "aeiouy";
+  const candidates = [];
+
+  for (const suf of ["ere", "ste", "er", "st", "e"]) {
+    if (!lower.endsWith(suf) || lower.length - suf.length < 3) continue;
+    const base = lower.slice(0, -suf.length);
+    candidates.push(base);
+
+    // Degeminate doubled final consonant: snell -> snel
+    if (base.length >= 4 && base.at(-1) === base.at(-2) && !vowels.includes(base.at(-1))) {
+      candidates.push(base.slice(0, -1));
+    }
+
+    // Restore long vowel in open syllable: grot -> groot, hog -> hoog
+    if (
+      base.length >= 3 &&
+      !vowels.includes(base.at(-1)) &&
+      "aeou".includes(base.at(-2)) &&
+      !vowels.includes(base.at(-3))
+    ) {
+      candidates.push(base.slice(0, -1) + base.at(-2) + base.at(-1));
+    }
+
+    // Restore f / s voicing alternation: intensiev -> intensief, boz -> boos
+    if (base.endsWith("v")) {
+      candidates.push(base.slice(0, -1) + "f");
+    } else if (base.endsWith("z")) {
+      candidates.push(base.slice(0, -1) + "s");
+      if (base.length >= 3 && "aeou".includes(base.at(-2)) && !vowels.includes(base.at(-3))) {
+        candidates.push(base.slice(0, -2) + base.at(-2) + "s");
+      }
+    }
+
+    // Diaeresis cleanup: financiël -> financieel
+    if (base.includes("ë")) {
+      const clean = base.replace(/ë/g, "e");
+      candidates.push(clean);
+      if (clean.endsWith("iel")) candidates.push(clean.slice(0, -3) + "ieel");
+    }
+  }
+
+  for (const cand of candidates) {
+    if (cand === lower) continue;
+    const hit = resolveEntry(cand);
+    if (hit && hit.d) return hit;
+  }
+  return null;
+}
+
 // Helper: split unlisted Dutch compounds (e.g., weekjournaal -> week + journaal)
 function splitCompound(rawWord) {
   if (rawWord.length < 6 || /^[A-Z0-9]+$/.test(rawWord)) return null;
@@ -214,6 +277,19 @@ function applyThresholds(score, thresholds) {
     idx++;
   }
   return idx;
+}
+
+// Flag scores within ±0.15 of a calibrated CEFR boundary
+function getBorderlineNote(rawScore, thresholds, labels) {
+  if (!Array.isArray(thresholds) || !Array.isArray(labels)) return "";
+  for (let i = 0; i < thresholds.length; i++) {
+    if (Math.abs(rawScore - thresholds[i]) <= 0.15) {
+      const lo = labels[i];
+      const hi = labels[i + 1];
+      if (lo && hi) return ` · borderline ${lo} / ${hi}`;
+    }
+  }
+  return "";
 }
 
 // Position score marker inside its threshold-calibrated segment on the 6-band bar
@@ -384,7 +460,7 @@ async function predictCEFR(features, logParity = true) {
 function classifyVocabToken(segment) {
   const rareThreshold = modelMeta.rare_zipf_threshold ?? 4.0;
   const nt2Labels = modelMeta.nt2_levels || ["A1", "A2", "B1", "B2", "C1"];
-  const resolved = resolveEntry(segment);
+  const resolved = resolveEntry(segment) || resolveInflectedUi(segment);
 
   if (resolved && resolved.c !== null) {
     // Skip A1/A2 words and top-frequency homographs (Zipf >= 5.5)
@@ -771,7 +847,8 @@ async function runGrade() {
 
     cefrBadgeEl.textContent = label;
     const chunkNote = chunkCount > 1 ? ` · avg of ${chunkCount} sections` : "";
-    scoreTextEl.textContent = `raw score: ${rawScore.toFixed(2)} / 5.00${chunkNote}`;
+    const borderlineNote = getBorderlineNote(rawScore, modelMeta.thresholds, modelMeta.labels);
+    scoreTextEl.textContent = `raw score: ${rawScore.toFixed(2)} / 5.00${chunkNote}${borderlineNote}`;
 
     scaleMarkerEl.style.left = `${scoreToBarPercent(rawScore, modelMeta.thresholds)}%`;
     scaleMarkerEl.hidden = false;
