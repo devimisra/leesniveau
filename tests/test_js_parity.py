@@ -215,8 +215,8 @@ def test_python_js_feature_and_onnx_parity(tmp_path):
             train_feats = train_extractor(text, dictionary, meta)
             np.testing.assert_allclose(js_feats, train_feats, rtol=1e-6, atol=1e-6)
 
-        py_score = float(sess.run(None, {input_name: np.array([py_feats], dtype=np.float32)})[0][0])
-        js_score = float(sess.run(None, {input_name: np.array([js_feats], dtype=np.float32)})[0][0])
+        py_score = float(sess.run(None, {input_name: np.array([py_feats], dtype=np.float32)})[0].item())
+        js_score = float(sess.run(None, {input_name: np.array([js_feats], dtype=np.float32)})[0].item())
         assert abs(py_score - js_score) < 1e-5
 
     # Verify UI morphological & compound guards stay intact
