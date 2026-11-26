@@ -1,6 +1,14 @@
 let session = null;
 let dictionary = null;
 let modelMeta = null;
+let lastVocabItems = [];
+let pdfjsPromise = null;
+let mammothPromise = null;
+
+const PDFJS_URL = "https://cdn.jsdelivr.net/npm/pdfjs-dist@4.10.38/build/pdf.min.mjs";
+const PDFJS_WORKER_URL = "https://cdn.jsdelivr.net/npm/pdfjs-dist@4.10.38/build/pdf.worker.min.mjs";
+const MAMMOTH_URL = "https://cdn.jsdelivr.net/npm/mammoth@1.11.0/mammoth.browser.min.js";
+const MAX_FILE_BYTES = 15 * 1024 * 1024;
 
 const ABBREV_RE =
   /\b(?:o\.a|bijv|d\.w\.z|i\.p\.v|m\.b\.v|m\.a\.w|t\.o\.v|t\.a\.v|i\.v\.m|n\.a\.v|o\.b\.v|o\.i\.d|e\.d|enz|etc|nl|dr|drs|prof|mr|ir|dhr|mw|mevr|fam|blz|pag|nr|ca|st|max|min|tel|a\.u\.b|s\.v\.p)\./gi;
@@ -30,6 +38,8 @@ const SAMPLES = {
 const statusEl = document.getElementById("status");
 const inputEl = document.getElementById("inputText");
 const gradeBtn = document.getElementById("gradeBtn");
+const uploadBtn = document.getElementById("uploadBtn");
+const fileInputEl = document.getElementById("fileInput");
 const clearBtn = document.getElementById("clearBtn");
 const resultsEl = document.getElementById("results");
 const cefrBadgeEl = document.getElementById("cefrBadge");
@@ -41,6 +51,8 @@ const langWarningEl = document.getElementById("langWarning");
 const annotatedTextEl = document.getElementById("annotatedText");
 const vocabListEl = document.getElementById("vocabList");
 const vocabCountEl = document.getElementById("vocabCount");
+const exportAnkiBtn = document.getElementById("exportAnkiBtn");
+const exportCsvBtn = document.getElementById("exportCsvBtn");
 
 // 1. Load model_meta.json fresh, then load version-cached ONNX model & dictionary
 async function init() {
@@ -66,7 +78,7 @@ async function init() {
     session = await ort.InferenceSession.create(modelBuffer);
     dictionary = dictJson;
 
-    statusEl.textContent = `Ready (model v${modelMeta.version}). Paste Dutch text below to grade.`;
+    statusEl.textContent = `Ready (model v${modelMeta.version}). Paste Dutch text or drop a file below.`;
     gradeBtn.disabled = false;
   } catch (err) {
     statusEl.textContent = `Error loading assets: ${err.message}`;
@@ -405,27 +417,32 @@ function classifyVocabToken(segment) {
   return null;
 }
 
-// 4. Render highlighted text and sorted study vocabulary list
+// 4. Render highlighted text, capture example sentences, and populate study vocabulary
 function renderVocabulary(text) {
+  const sentSegmenter = new Intl.Segmenter("nl", { granularity: "sentence" });
   const wordSegmenter = new Intl.Segmenter("nl", { granularity: "word" });
   const vocabMap = new Map();
   let html = "";
 
-  for (const { segment, isWordLike } of wordSegmenter.segment(text)) {
-    if (!isWordLike) {
-      html += escapeHtml(segment);
-      continue;
-    }
+  for (const { segment: sentence } of sentSegmenter.segment(text)) {
+    const cleanContext = sentence.replace(/\s+/g, " ").trim();
 
-    const item = classifyVocabToken(segment);
-    if (item) {
-      const tooltip = escapeHtml(`[${item.badge}] ${item.word}: ${item.definition}`);
-      html += `<span class="hl hl-${item.cssKey}" title="${tooltip}">${escapeHtml(segment)}</span>`;
-      if (!vocabMap.has(item.key)) {
-        vocabMap.set(item.key, item);
+    for (const { segment, isWordLike } of wordSegmenter.segment(sentence)) {
+      if (!isWordLike) {
+        html += escapeHtml(segment);
+        continue;
       }
-    } else {
-      html += escapeHtml(segment);
+
+      const item = classifyVocabToken(segment);
+      if (item) {
+        const tooltip = escapeHtml(`[${item.badge}] ${item.word}: ${item.definition}`);
+        html += `<span class="hl hl-${item.cssKey}" title="${tooltip}">${escapeHtml(segment)}</span>`;
+        if (!vocabMap.has(item.key)) {
+          vocabMap.set(item.key, { ...item, context: cleanContext });
+        }
+      } else {
+        html += escapeHtml(segment);
+      }
     }
   }
 
@@ -434,7 +451,10 @@ function renderVocabulary(text) {
   const sortedItems = [...vocabMap.values()].sort(
     (a, b) => b.sortRank - a.sortRank || a.word.localeCompare(b.word, "nl")
   );
+  lastVocabItems = sortedItems;
   vocabCountEl.textContent = String(sortedItems.length);
+  exportAnkiBtn.disabled = sortedItems.length === 0;
+  exportCsvBtn.disabled = sortedItems.length === 0;
   vocabListEl.innerHTML = "";
 
   if (sortedItems.length === 0) {
@@ -450,6 +470,212 @@ function renderVocabulary(text) {
       `<span class="badge badge-${item.cssKey}">${escapeHtml(item.badge)}</span> ` +
       `<strong>${escapeHtml(item.word)}</strong>: ${escapeHtml(item.definition)}`;
     vocabListEl.appendChild(li);
+  }
+}
+
+// 5. One-click Anki (.tsv) and CSV (.csv) exports
+function triggerDownload(filename, content, mimeType) {
+  const blob = new Blob([content], { type: mimeType });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+function cleanTsvField(str) {
+  return String(str || "").replace(/[\t\r\n]+/g, " ").trim();
+}
+
+function escapeCsvField(str) {
+  const s = String(str || "").replace(/\r?\n/g, " ");
+  return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+}
+
+function exportAnkiTsv() {
+  if (!lastVocabItems.length) return;
+  const header = [
+    "#separator:tab",
+    "#html:false",
+    "#columns:Word\tDefinition\tLevel\tContext\tTags"
+  ];
+  const rows = lastVocabItems.map(item => {
+    const tag = `leesniveau::${item.badge.split(" ")[0].toLowerCase()}`;
+    return [
+      cleanTsvField(item.word),
+      cleanTsvField(item.definition),
+      cleanTsvField(item.badge),
+      cleanTsvField(item.context),
+      tag
+    ].join("\t");
+  });
+  const stamp = new Date().toISOString().slice(0, 10);
+  triggerDownload(
+    `leesniveau-anki-${stamp}.tsv`,
+    [...header, ...rows].join("\n") + "\n",
+    "text/tab-separated-values;charset=utf-8"
+  );
+}
+
+function exportCsv() {
+  if (!lastVocabItems.length) return;
+  const header = "Word,Level,Definition,Context";
+  const rows = lastVocabItems.map(item =>
+    [item.word, item.badge, item.definition, item.context].map(escapeCsvField).join(",")
+  );
+  const stamp = new Date().toISOString().slice(0, 10);
+  // Prepend UTF-8 BOM so Excel/Numbers renders Dutch diacritics cleanly
+  triggerDownload(
+    `leesniveau-vocab-${stamp}.csv`,
+    "\uFEFF" + [header, ...rows].join("\r\n") + "\r\n",
+    "text/csv;charset=utf-8"
+  );
+}
+
+// 6. Client-side multi-format file loaders (.txt, .md, .srt, .vtt, .pdf, .docx)
+function stripMarkdown(md) {
+  return md
+    .replace(/```[\s\S]*?```/g, "\n")
+    .replace(/!\[[^\]]*\]\([^)]+\)/g, "")
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
+    .replace(/^#{1,6}\s+/gm, "")
+    .replace(/^>\s?/gm, "")
+    .replace(/[*_~`]+/g, "")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+function stripSubtitles(raw) {
+  return raw
+    .replace(/^\uFEFF/, "")
+    .replace(/^WEBVTT[^\n]*\n+/i, "")
+    .replace(/^(?:NOTE|STYLE)[\s\S]*?(?:\r?\n\r?\n|$)/gim, "")
+    .split(/\r?\n/)
+    .map(line => line.trim())
+    .filter(line => line && !/^\d+$/.test(line) && !line.includes("-->"))
+    .map(line => line.replace(/<[^>]+>/g, "").trim())
+    .filter(Boolean)
+    .join(" ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+async function getPdfJs() {
+  if (!pdfjsPromise) {
+    pdfjsPromise = import(PDFJS_URL).then(lib => {
+      lib.GlobalWorkerOptions.workerSrc = PDFJS_WORKER_URL;
+      return lib;
+    });
+  }
+  return pdfjsPromise;
+}
+
+async function extractPdfText(arrayBuffer) {
+  const pdfjsLib = await getPdfJs();
+  const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+  const pageTexts = [];
+
+  for (let p = 1; p <= pdf.numPages; p++) {
+    const page = await pdf.getPage(p);
+    const content = await page.getTextContent();
+    let out = "";
+    let prevY = null;
+    let prevHeight = 12;
+
+    for (const item of content.items) {
+      const str = (item.str || "").trim();
+      if (!str) continue;
+
+      const y = Array.isArray(item.transform) ? item.transform[5] : prevY;
+      const height = item.height > 0 ? item.height : prevHeight;
+
+      if (prevY !== null && Math.abs(y - prevY) > height * 1.6) {
+        out += "\n\n" + str;
+      } else if (/[a-zà-ÿ]-$/i.test(out) && /^[a-zà-ÿ]/.test(str)) {
+        // Rejoin Dutch words hyphenated across PDF line wraps
+        out = out.slice(0, -1) + str;
+      } else if (out && !out.endsWith("\n")) {
+        out += " " + str;
+      } else {
+        out += str;
+      }
+
+      prevY = y;
+      prevHeight = height;
+    }
+
+    if (out.trim()) pageTexts.push(out.trim());
+  }
+
+  const combined = pageTexts.join("\n\n").replace(/[ \t]{2,}/g, " ").trim();
+  if (!WORD_RE.test(combined)) {
+    throw new Error("No selectable text found in this PDF (it may be a scanned image).");
+  }
+  return combined;
+}
+
+function getMammoth() {
+  if (window.mammoth) return Promise.resolve(window.mammoth);
+  if (!mammothPromise) {
+    mammothPromise = new Promise((resolve, reject) => {
+      const script = document.createElement("script");
+      script.src = MAMMOTH_URL;
+      script.onload = () =>
+        window.mammoth ? resolve(window.mammoth) : reject(new Error("Failed to initialize mammoth."));
+      script.onerror = () => reject(new Error("Could not load .docx parser from CDN."));
+      document.head.appendChild(script);
+    });
+  }
+  return mammothPromise;
+}
+
+async function extractDocxText(arrayBuffer) {
+  const mammoth = await getMammoth();
+  const result = await mammoth.extractRawText({ arrayBuffer });
+  return (result.value || "").trim();
+}
+
+async function handleFile(file) {
+  if (!file) return;
+  if (file.size > MAX_FILE_BYTES) {
+    statusEl.textContent = "File is too large (limit: 15 MB).";
+    return;
+  }
+
+  const ext = file.name.includes(".") ? file.name.split(".").pop().toLowerCase() : "";
+  statusEl.textContent = `Reading ${file.name} locally in your browser...`;
+
+  try {
+    let extracted = "";
+    if (ext === "txt") {
+      extracted = await file.text();
+    } else if (ext === "md" || ext === "markdown") {
+      extracted = stripMarkdown(await file.text());
+    } else if (ext === "srt" || ext === "vtt") {
+      extracted = stripSubtitles(await file.text());
+    } else if (ext === "pdf") {
+      extracted = await extractPdfText(await file.arrayBuffer());
+    } else if (ext === "docx") {
+      extracted = await extractDocxText(await file.arrayBuffer());
+    } else {
+      throw new Error("Unsupported file type. Use .txt, .md, .pdf, .docx, .srt, or .vtt.");
+    }
+
+    inputEl.value = extracted.trim();
+    if (!gradeBtn.disabled) {
+      await runGrade();
+      statusEl.textContent = `Loaded ${file.name} locally (model v${modelMeta.version}).`;
+    } else {
+      statusEl.textContent = `Loaded ${file.name}. Waiting for model to finish loading...`;
+    }
+  } catch (err) {
+    statusEl.textContent = `File error: ${err.message}`;
+    console.error(err);
+  } finally {
+    fileInputEl.value = "";
   }
 }
 
@@ -542,13 +768,34 @@ async function runGrade() {
 }
 
 gradeBtn.addEventListener("click", runGrade);
+exportAnkiBtn.addEventListener("click", exportAnkiTsv);
+exportCsvBtn.addEventListener("click", exportCsv);
+
+uploadBtn.addEventListener("click", () => fileInputEl.click());
+fileInputEl.addEventListener("change", e => handleFile(e.target.files[0]));
+
+inputEl.addEventListener("dragover", e => {
+  e.preventDefault();
+  inputEl.classList.add("drag-over");
+});
+inputEl.addEventListener("dragleave", () => inputEl.classList.remove("drag-over"));
+inputEl.addEventListener("drop", e => {
+  e.preventDefault();
+  inputEl.classList.remove("drag-over");
+  if (e.dataTransfer?.files?.length) {
+    handleFile(e.dataTransfer.files[0]);
+  }
+});
 
 clearBtn.addEventListener("click", () => {
   inputEl.value = "";
+  lastVocabItems = [];
+  exportAnkiBtn.disabled = true;
+  exportCsvBtn.disabled = true;
   resultsEl.hidden = true;
   shortWarningEl.hidden = true;
   langWarningEl.hidden = true;
-  if (modelMeta) statusEl.textContent = `Ready (model v${modelMeta.version}). Paste Dutch text below to grade.`;
+  if (modelMeta) statusEl.textContent = `Ready (model v${modelMeta.version}). Paste Dutch text or drop a file below.`;
   inputEl.focus();
 });
 

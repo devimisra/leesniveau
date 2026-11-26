@@ -27,12 +27,20 @@
       <textarea
         id="inputText"
         rows="8"
-        placeholder="Plak hier een Nederlandse tekst (minimaal 30 woorden voor een betrouwbare schatting)..."
+        placeholder="Plak hier een Nederlandse tekst of sleep een bestand (.txt, .md, .pdf, .docx, .srt, .vtt) in dit vak..."
       ></textarea>
 
       <div class="actions">
         <button id="gradeBtn" type="button" disabled>Grade Text</button>
+        <button id="uploadBtn" type="button" class="secondary-btn">Upload File</button>
+        <input
+          id="fileInput"
+          type="file"
+          accept=".txt,.md,.markdown,.pdf,.docx,.srt,.vtt"
+          hidden
+        />
         <button id="clearBtn" type="button" class="secondary-btn">Clear</button>
+        <span class="file-hint">or drag &amp; drop .txt / .md / .pdf / .docx / .srt</span>
       </div>
     </section>
 
@@ -71,15 +79,17 @@
 
       <div class="panel">
         <div class="panel-header">
-          <h2>Annotated Text</h2>
-          <div class="legend">
-            <span class="badge badge-b1">B1</span>
-            <span class="badge badge-b2">B2</span>
-            <span class="badge badge-c1">C1</span>
-            <span class="badge badge-rare">Rare / Compound</span>
+          <h2>Study Vocabulary (<span id="vocabCount">0</span>)</h2>
+          <div class="export-actions">
+            <button id="exportAnkiBtn" type="button" class="secondary-btn small-btn" disabled>
+              Export Anki (.tsv)
+            </button>
+            <button id="exportCsvBtn" type="button" class="secondary-btn small-btn" disabled>
+              Export CSV
+            </button>
           </div>
         </div>
-        <div id="annotatedText"></div>
+        <ul id="vocabList"></ul>
       </div>
 
       <div class="panel">

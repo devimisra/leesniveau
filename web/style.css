@@ -327,3 +327,32 @@ textarea:focus {
 .footer a {
   color: var(--primary);
 }
+
+textarea.drag-over {
+  border-color: #2563eb;
+  background-color: #eff6ff;
+  outline: 2px dashed #2563eb;
+  outline-offset: -4px;
+}
+
+.file-hint {
+  font-size: 0.85rem;
+  color: #64748b;
+  align-self: center;
+}
+
+.export-actions {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.small-btn {
+  padding: 0.35rem 0.7rem;
+  font-size: 0.85rem;
+}
+
+.small-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
