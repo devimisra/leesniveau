@@ -24,16 +24,24 @@ def load_train_ns(dictionary):
     tree = ast.parse(source, filename=str(train_path))
     safe_nodes = []
     for node in tree.body:
-        if isinstance(node, (ast.Import, ast.ImportFrom, ast.FunctionDef)):
+        if isinstance(node, ast.FunctionDef):
             safe_nodes.append(node)
         elif isinstance(node, ast.Assign):
             if all(isinstance(t, ast.Name) and t.id.isupper() and t.id != "X" for t in node.targets):
                 safe_nodes.append(node)
     safe_mod = ast.Module(body=safe_nodes, type_ignores=[])
-    ns = {"dictionary": dictionary}
+    ns = {
+        "json": json,
+        "math": __import__("math"),
+        "re": __import__("re"),
+        "np": np,
+        "dictionary": dictionary,
+    }
     exec(compile(safe_mod, str(train_path), "exec"), ns)
     ns["dictionary"] = dictionary
     return ns
+
+
 
 
 def test_dictionary_invariants():
