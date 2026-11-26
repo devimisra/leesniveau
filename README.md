@@ -2,8 +2,6 @@
 
 **[Try the Live App](https://devimisra.github.io/leesniveau/)** · 100% client-side (no text leaves your browser)
 
-[![Live Demo](https://img.shields.io/badge/Live_Demo-LeesNiveau-2563eb?style=for-the-badge)](https://<your-username>.github.io/<your-repo>/)
-
 **LeesNiveau** estimates the CEFR reading level (**A1–C2**) of Dutch text entirely in the browser using **WebAssembly (ONNX Runtime Web)** and a 128k-entry client-side lexical dictionary—no backend server, API keys, or external NLP runtime required.
 
 ## Key Features
