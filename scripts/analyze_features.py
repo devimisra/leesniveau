@@ -25,22 +25,53 @@ warnings.filterwarnings("ignore")
 
 DATA_PATH = "../data/local_elg_cefr_nl.json"
 DICT_PATH = "../web/dictionary.json"
+META_PATH = "../web/model_meta.json"
 LOG_DIR = "../logs"
 os.makedirs(LOG_DIR, exist_ok=True)
 
 CEFR_ORDER = ["A1", "A2", "B1", "B2", "C1", "C2"]
 CEFR_MAP = {lvl: i for i, lvl in enumerate(CEFR_ORDER)}
+
 FEATURES = [
     "avg_sent_len", "max_sent_len", "std_sent_len",
-    "avg_word_len", "long_word_ratio", "ttr", "guiraud_ttr",
-    "avg_zipf", "p10_zipf", "rare_word_ratio",
-    "nt2_mean_first", "nt2_p90_first", "nt2_a1a2_ratio",
-    "nt2_b2plus_ratio", "nt2_oov_ratio",
+    "avg_word_len", "long_word_ratio", "guiraud_ttr",
+    "p10_zipf", "rare_word_ratio",
+    "nt2_mean_first", "rare_nt2_oov_ratio", "common_nt2_oov_ratio",
 ]
 
-SENT_SPLIT_RE = re.compile(r"[.!?]+(?:\s+|$)")
-WORD_RE = re.compile(r"[A-Za-zÀ-ÖØ-öø-ÿ]+")
+ABBREV_RE = re.compile(
+    r"\b(?:o\.a|bijv|d\.w\.z|i\.p\.v|m\.b\.v|m\.a\.w|t\.o\.v|t\.a\.v|"
+    r"i\.v\.m|n\.a\.v|o\.b\.v|o\.i\.d|e\.d|enz|etc|nl|dr|drs|prof|"
+    r"mr|ir|dhr|mw|mevr|fam|blz|pag|nr|ca|st|max|min|tel|a\.u\.b|s\.v\.p)\.",
+    re.IGNORECASE,
+)
+SENT_SPLIT_RE = re.compile(r"[.!?]+(?:\s+|$)|\r?\n+")
+CLAUSE_SPLIT_RE = re.compile(
+    r"[,;:()–—]+|\b(?:en|maar|want|of|dus|omdat|dat|toen|terwijl|hoewel|"
+    r"indien|zodat|waardoor|waarbij|als|wanneer|omtrent)\b",
+    re.IGNORECASE,
+)
+WORD_RE = re.compile(r"[A-Za-zÀ-ÖØ-öø-ÿ]+(?:['-][A-Za-zÀ-ÖØ-öø-ÿ]+)*")
 RARE_ZIPF_THRESHOLD = 4.0
+
+SEPARABLE_PARTICLES = {
+    "aan", "achter", "af", "bij", "binnen", "boven", "buiten", "door", "gelijk", "goed",
+    "in", "langs", "mee", "mis", "na", "neer", "om", "onder", "op", "open", "over",
+    "rond", "samen", "schoon", "stil", "tegen", "terug", "thuis", "toe", "tussen",
+    "uit", "vast", "voor", "voort", "vrij", "weg", "weer",
+}
+
+AUX_OR_STOP_VERBS = {
+    "zijn", "hebben", "worden", "kunnen", "moeten", "zullen", "willen", "mogen",
+    "de", "het", "een", "dat", "die", "wat", "wie", "waar", "hoe",
+}
+
+VERB_INF_RE = re.compile(r"(?:en|aan|oen|ijn|ien)$")
+
+
+def is_verb_infinitive(lemma: str) -> bool:
+    return bool(VERB_INF_RE.search(lemma)) and len(lemma) >= 5
+
 
 print("1. Loading unified dictionary.json and dataset...")
 with open(DICT_PATH, "r", encoding="utf-8") as f:
@@ -57,11 +88,10 @@ df = df.dropna(subset=["target"]).reset_index(drop=True)
 y = df["target"].astype(int).values
 
 
-def resolve_entry(word):
-    lower = word.lower()
+def _lookup_exact(lower):
     entry = dictionary.get(lower)
     if not entry:
-        return (lower, 0.0, None)
+        return None
     if "l" in entry:
         base_word = entry["l"]
         base = dictionary.get(base_word)
@@ -72,18 +102,106 @@ def resolve_entry(word):
     return (lower, entry.get("z", 0.0), entry.get("c"))
 
 
+def resolve_entry(word):
+    lower = word.lower().replace("’", "'")
+    hit = _lookup_exact(lower)
+    if hit:
+        return hit
+    if lower.endswith("'s") and len(lower) > 3:
+        hit = _lookup_exact(lower[:-2])
+        if hit:
+            return hit
+    if "-" in lower:
+        hit = _lookup_exact(lower.replace("-", ""))
+        if hit:
+            return hit
+    return None
+
+
+def find_separable_matches(clause_words):
+    matches = {}
+    if len(clause_words) < 2:
+        return matches
+
+    last_idx = len(clause_words) - 1
+    particle_lower = clause_words[last_idx].lower()
+    if particle_lower not in SEPARABLE_PARTICLES:
+        return matches
+
+    for i in range(last_idx):
+        raw_verb = clause_words[i]
+        verb_lower = raw_verb.lower()
+        if verb_lower in SEPARABLE_PARTICLES:
+            continue
+
+        verb_resolved = resolve_entry(raw_verb)
+        stem_lemmas = []
+        if verb_resolved and is_verb_infinitive(verb_resolved[0]):
+            stem_lemmas.append(verb_resolved[0])
+
+        for suf in ("ten", "den", "te", "de", "t"):
+            if verb_lower.endswith(suf) and len(verb_lower) - len(suf) >= 3:
+                root = verb_lower[:-len(suf)]
+                stem_lemmas.append(root + "en")
+                if len(root) >= 2 and root[-1] == root[-2]:
+                    stem_lemmas.append(root[:-1] + "en")
+
+        for stem in stem_lemmas:
+            if stem in AUX_OR_STOP_VERBS:
+                continue
+            candidate = particle_lower + stem
+            comp_hit = _lookup_exact(candidate)
+            if comp_hit and (
+                candidate in dictionary
+                and (
+                    "d" in dictionary[candidate]
+                    or "c" in dictionary[candidate]
+                    or "l" in dictionary[candidate]
+                )
+            ):
+                merged_len = len(raw_verb) + len(clause_words[last_idx])
+                matches[i] = (comp_hit, merged_len, "verb")
+                matches[last_idx] = (comp_hit, merged_len, "particle")
+                return matches
+
+    return matches
+
+
+def split_sentence_clauses(sentence_str):
+    return [words for c in CLAUSE_SPLIT_RE.split(sentence_str) if (words := WORD_RE.findall(c))]
+
+
+def split_sentences(text):
+    cleaned = text.strip().replace("’", "'")
+    cleaned = ABBREV_RE.sub(lambda m: m.group(0).replace(".", "·"), cleaned)
+    raw_sentences = [s.strip() for s in SENT_SPLIT_RE.split(cleaned) if s.strip()]
+    return [clauses for s in raw_sentences if (clauses := split_sentence_clauses(s))]
+
+
 def extract_features(text):
-    raw_sentences = [s.strip() for s in SENT_SPLIT_RE.split(text.strip()) if s.strip()]
-    all_words = []
+    sent_clause_lists = split_sentences(text)
     sent_lengths = []
+    merged_tokens = []
 
-    for sent in raw_sentences:
-        words = WORD_RE.findall(sent)
-        if words:
-            sent_lengths.append(len(words))
-            all_words.extend(words)
+    for clauses in sent_clause_lists:
+        sent_word_count = 0
+        for clause_words in clauses:
+            sep_matches = find_separable_matches(clause_words)
+            for i, w in enumerate(clause_words):
+                sep = sep_matches.get(i)
+                if sep:
+                    comp_hit, merged_len, role = sep
+                    if role == "particle":
+                        continue
+                    sent_word_count += 1
+                    merged_tokens.append((merged_len, comp_hit, comp_hit[0]))
+                else:
+                    sent_word_count += 1
+                    merged_tokens.append((len(w), resolve_entry(w), w.lower()))
+        if sent_word_count > 0:
+            sent_lengths.append(sent_word_count)
 
-    num_words = len(all_words)
+    num_words = len(merged_tokens)
     num_sents = len(sent_lengths)
     if num_words == 0 or num_sents == 0:
         row = {f: 0.0 for f in FEATURES}
@@ -93,42 +211,40 @@ def extract_features(text):
     avg_sent_len = num_words / num_sents
     max_sent_len = float(max(sent_lengths))
     std_sent_len = float(np.std(sent_lengths))
-    avg_word_len = sum(len(w) for w in all_words) / num_words
-    long_word_ratio = sum(1 for w in all_words if len(w) >= 10) / num_words
+    avg_word_len = sum(t[0] for t in merged_tokens) / num_words
+    long_word_ratio = sum(1 for t in merged_tokens if t[0] >= 10) / num_words
 
     unique_lemmas = set()
     valid_zipf = []
     nt2_first_scores = []
-    nt2_a1a2 = 0
-    nt2_b2plus = 0
-    nt2_oov = 0
+    rare_nt2_oov = 0
+    common_nt2_oov = 0
 
-    for w in all_words:
-        lemma, z, c = resolve_entry(w)
-        unique_lemmas.add(lemma)
-        if z > 0:
-            valid_zipf.append(z)
-        if c is not None:
-            nt2_first_scores.append(c)
-            if c <= 1:
-                nt2_a1a2 += 1
-            elif c >= 3:
-                nt2_b2plus += 1
+    for _, resolved, raw_lower in merged_tokens:
+        if resolved:
+            lemma, z, c = resolved
+            unique_lemmas.add(lemma)
+            if z > 0:
+                valid_zipf.append(z)
+            if c is not None:
+                nt2_first_scores.append(c)
+            elif z > 0 and z >= RARE_ZIPF_THRESHOLD:
+                common_nt2_oov += 1
+            else:
+                rare_nt2_oov += 1
         else:
-            nt2_oov += 1
+            unique_lemmas.add(raw_lower)
+            rare_nt2_oov += 1
 
-    ttr = len(unique_lemmas) / num_words
     guiraud_ttr = len(unique_lemmas) / math.sqrt(num_words)
 
     if valid_zipf:
-        avg_zipf = sum(valid_zipf) / len(valid_zipf)
         p10_zipf = float(np.percentile(valid_zipf, 10))
         rare_word_ratio = sum(1 for z in valid_zipf if z < RARE_ZIPF_THRESHOLD) / len(valid_zipf)
     else:
-        avg_zipf, p10_zipf, rare_word_ratio = 0.0, 0.0, 0.0
+        p10_zipf, rare_word_ratio = 0.0, 0.0
 
     nt2_mean_first = sum(nt2_first_scores) / len(nt2_first_scores) if nt2_first_scores else 4.0
-    nt2_p90_first = float(np.percentile(nt2_first_scores, 90)) if nt2_first_scores else 4.0
 
     return {
         "avg_sent_len": avg_sent_len,
@@ -136,16 +252,12 @@ def extract_features(text):
         "std_sent_len": std_sent_len,
         "avg_word_len": avg_word_len,
         "long_word_ratio": long_word_ratio,
-        "ttr": ttr,
         "guiraud_ttr": guiraud_ttr,
-        "avg_zipf": avg_zipf,
         "p10_zipf": p10_zipf,
         "rare_word_ratio": rare_word_ratio,
         "nt2_mean_first": nt2_mean_first,
-        "nt2_p90_first": nt2_p90_first,
-        "nt2_a1a2_ratio": nt2_a1a2 / num_words,
-        "nt2_b2plus_ratio": nt2_b2plus / num_words,
-        "nt2_oov_ratio": nt2_oov / num_words,
+        "rare_nt2_oov_ratio": rare_nt2_oov / num_words,
+        "common_nt2_oov_ratio": common_nt2_oov / num_words,
         "num_words": num_words,
     }
 
@@ -170,7 +282,7 @@ def build_model():
     return xgb.XGBRegressor(
         objective="reg:squarederror",
         eval_metric="rmse",
-        n_estimators=250,
+        n_estimators=200,
         learning_rate=0.04,
         max_depth=4,
         min_child_weight=5,
@@ -180,7 +292,7 @@ def build_model():
     )
 
 
-print(f"2. Extracting 15 JS-parity features for {len(df)} texts...")
+print(f"2. Extracting 11 JS-parity features for {len(df)} texts...")
 feat_df = pd.DataFrame([extract_features(t) for t in df["text"]])
 X = feat_df[FEATURES].astype(np.float32)
 df["num_words"] = feat_df["num_words"]
@@ -239,7 +351,6 @@ for fold, (tr_idx, va_idx) in enumerate(skf.split(X, y), start=1):
     fold_mae = mean_absolute_error(y_va, oof_tuned[va_idx])
     print(f"   Fold {fold} | Val RMSE: {evals['validation_1']['rmse'][-1]:.4f} | MAE: {fold_mae:.3f} | QWK: {fold_qwk:.3f}")
 
-# Overall OOF summary
 diffs = np.abs(y - oof_tuned)
 print("\n--- Overall 5-Fold OOF Metrics (Tuned Thresholds) ---")
 print(
@@ -251,7 +362,6 @@ print(
 print("\n--- Per-Class Classification Report (OOF) ---")
 print(classification_report(y, oof_tuned, target_names=CEFR_ORDER, digits=3))
 
-# Check accuracy by text length bucket
 df["oof_raw"] = oof_raw
 df["oof_pred"] = oof_tuned
 df["abs_err"] = diffs
@@ -272,15 +382,19 @@ for bucket, grp in df.groupby("len_bucket", observed=False):
         f"MAE: {grp['abs_err'].mean():.3f}"
     )
 
-# Fit final model for Gain plot and global thresholds
-final_thresholds = fit_thresholds(y, oof_raw)
+if os.path.exists(META_PATH):
+    with open(META_PATH, "r", encoding="utf-8") as f:
+        final_thresholds = json.load(f).get("thresholds") or fit_thresholds(y, oof_raw)
+else:
+    final_thresholds = fit_thresholds(y, oof_raw)
+
 sw_full = np.sqrt(compute_sample_weight("balanced", y))
 final_model = build_model()
 final_model.fit(X, y, sample_weight=sw_full)
 
 print("\n4. Saving diagnostic plots to ../logs/...")
 
-# --- Plot 1: Learning Curves (Overfitting Check) ---
+# --- Plot 1: Learning Curves ---
 mean_tr_rmse = np.mean(train_rmse_folds, axis=0)
 mean_va_rmse = np.mean(val_rmse_folds, axis=0)
 std_va_rmse = np.std(val_rmse_folds, axis=0)
@@ -294,14 +408,14 @@ plt.fill_between(rounds, mean_va_rmse - std_va_rmse, mean_va_rmse + std_va_rmse,
 plt.axvline(best_round, color="#0f172a", ls="--", lw=1.2, label=f"Best Val Round ({best_round}: {mean_va_rmse[best_round-1]:.3f})")
 plt.xlabel("Boosting Round (Trees)")
 plt.ylabel("Weighted RMSE")
-plt.title("5-Fold CV Learning Curve (XGBRegressor)")
+plt.title("5-Fold CV Learning Curve (XGBRegressor, 11 Features)")
 plt.legend()
 plt.grid(alpha=0.25)
 plt.tight_layout()
 plt.savefig(f"{LOG_DIR}/learning_curves.png", dpi=150)
 plt.close()
 
-# --- Plot 2: OOF Confusion Matrix (Row-Normalized % + Raw Counts) ---
+# --- Plot 2: OOF Confusion Matrix ---
 cm = confusion_matrix(y, oof_tuned, labels=range(6))
 cm_norm = cm / cm.sum(axis=1, keepdims=True)
 
@@ -327,7 +441,7 @@ plt.tight_layout()
 plt.savefig(f"{LOG_DIR}/confusion_matrix_oof.png", dpi=150)
 plt.close()
 
-# --- Plot 3: Continuous OOF Score Distribution vs. Tuned Thresholds ---
+# --- Plot 3: Continuous OOF Score Distribution vs. Cutpoints ---
 plt.figure(figsize=(9, 5.5))
 grouped_scores = [oof_raw[y == i] for i in range(6)]
 bp = plt.boxplot(grouped_scores, tick_labels=CEFR_ORDER, patch_artist=True, showfliers=True)
@@ -342,7 +456,7 @@ for t_val, boundary in zip(final_thresholds, ["A1|A2", "A2|B1", "B1|B2", "B2|C1"
 plt.xlim(0.5, 7.2)
 plt.xlabel("True CEFR Level")
 plt.ylabel("Predicted Raw Score (OOF)")
-plt.title("OOF Regression Score Distributions vs. Tuned Cutpoints")
+plt.title("OOF Regression Score Distributions vs. Calibrated Cutpoints")
 plt.grid(axis="y", alpha=0.25)
 plt.tight_layout()
 plt.savefig(f"{LOG_DIR}/score_distributions.png", dpi=150)
@@ -354,17 +468,17 @@ xgb.plot_importance(
     final_model,
     ax=ax,
     importance_type="gain",
-    title="XGBoost Feature Importance (Information Gain, 15 Features)",
+    title="XGBoost Feature Importance (Information Gain, 11 Features)",
     show_values=False,
 )
 plt.tight_layout()
 plt.savefig(f"{LOG_DIR}/xgboost_gain.png", dpi=150)
 plt.close()
 
-# --- Plot 5A: OOF SHAP Beeswarm (Direction + Magnitude) ---
+# --- Plot 5A: OOF SHAP Beeswarm ---
 plt.figure(figsize=(10, 6.5))
 shap.summary_plot(oof_shap, X, show=False)
-plt.title("Out-of-Fold SHAP Values (Impact on Predicted CEFR Score)")
+plt.title("Out-of-Fold SHAP Values (11 Features, v1.5.1)")
 plt.tight_layout()
 plt.savefig(f"{LOG_DIR}/shap_beeswarm.png", dpi=150)
 plt.close()
@@ -372,7 +486,7 @@ plt.close()
 # --- Plot 5B: OOF SHAP Global Bar Plot ---
 plt.figure(figsize=(9, 5.5))
 shap.summary_plot(oof_shap, X, plot_type="bar", show=False)
-plt.title("Mean |SHAP| Impact on CEFR Score (5-Fold OOF)")
+plt.title("Mean |SHAP| Impact on CEFR Score (5-Fold OOF, 11 Features)")
 plt.tight_layout()
 plt.savefig(f"{LOG_DIR}/shap_bar.png", dpi=150)
 plt.close()
